@@ -78,6 +78,7 @@ Before running the application, set the following environment variables with you
 
 - **OPENAI_API_KEY**  
 - **GROQ_API_KEY** (if using the GROQ service)
+- **DEEPSEEK_API_KEY** (if using DEEPSEEK service)
 - **PERPLEXITY_API_KEY**  
 - **FIRECRAWL_API_KEY**
 
@@ -85,6 +86,7 @@ For example, on Linux or macOS:
 
    export OPENAI_API_KEY="your_openai_key"  
    export GROQ_API_KEY="your_groq_key"  
+   export DEEPSEEK_API_KEY="your_deepseek_key"  
    export PERPLEXITY_API_KEY="your_perplexity_key"  
    export FIRECRAWL_API_KEY="your_firecrawl_key"
 
