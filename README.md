@@ -56,7 +56,7 @@ The core functionality is implemented in a single Python script, which features:
 
 1. **Clone the Repository:**
 
-   git clone https://github.com/zestor/DeepResearcher.git
+   git clone https://github.com/zestor/DeepResearcher.git  
    cd DeepResearcher
 
 2. **Create a Virtual Environment (Optional but Recommended):**
