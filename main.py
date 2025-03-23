@@ -23,7 +23,7 @@ class Service(Enum):
 # SET THIS STUFF FOR YOUR USE CASE
 #####################################################
 USE_SERVICE = Service.GROQ  # Change to Service.DEEPSEEK or Service.GROQ or SERVICE.OPENAI
-ANSWER_QUALITY_THRESHOLD = 0.95 # 0.00 - 1.00
+ANSWER_QUALITY_THRESHOLD = 0.99 # 0.00 - 1.00
 LLM_RETRY_WAIT_TIME = 20 # in seconds
 LLM_RETRY_COUNT = 5 # in seconds
 DEEPSEEK_USE_MODEL = "deepseek-reasoner"
@@ -1177,7 +1177,7 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
                 is_pass_threshold = True
 
             if is_pass_threshold:
-                prompt = f'Write your long long long narrative final answer to the user\'s question without missing any detail. Response must be text, not JSON.\n\nUser\'s Question\n\n{question}'
+                prompt = f"I conduct thorough research to create detailed and balanced investigative reports. I explore every avenue to produce comprehensive narratives, considering that the user might not be an expert in the domain, class, or task. I explain concepts clearly and informatively, being sensitive to the user's perspective without highlighting any lack of expertise. I carefully analyze the entire conversation, ensuring no detail is overlooked. With this in mind, I will write a comprehensive narrative report that addresses the Who, What, When, Where, How, and Why, without using these as section titles, as a text response.\n\nUser\'s Question\n\n{question}"
                 final_answer = call_openai(prompt, OPENAI_USE_MODEL_SUMMARY, messages)
                 return final_answer
             else:
@@ -1227,7 +1227,7 @@ def main():
         Transform the original user_question below into a detailed, organized format that fully captures its intent, scope, and context.
 
         Rules:
-        1. Determine the primary goal of the query.
+        1. Determine the primary goal of the query. Who, What, When, Where, How, and Why.
         2. If the query covers multiple themes or issues, break it down into separate sub-queries.
         3. For each sub-query:
             • Extract and list key details, context, and specific requirements.
