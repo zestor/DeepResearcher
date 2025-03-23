@@ -1067,7 +1067,7 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
 
     if model_version in MODELS_WITHOUT_TOOL_USAGE:
         system_message = (
-            "I've upgraded your functionality to access post-Oct 2023 data and use tools. You can now request tool "
+            "I've upgraded your functionality post training data cutoff to access current data and use tools. You can now request tool "
             "executions using JSON in your responses, and I'll run them and return the results in user messages. "
             "You are able to call tools just by telling me you want to run a tool by responding with JSON as described below. "
             "You are a helpful AI that can use the following tools by producing JSON in your message. "
