@@ -36,6 +36,8 @@ OPENAI_USE_MODEL_SUMMARY = "o1-mini"
 MAX_TOOL_PARALLEL_THREADS = 20
 SCORING_USE_OPENAI = True
 MAX_TRIES_TO_INCREASE_SCORE = 3 # number of times with same score
+USE_MULTI_ROUND_TEST_TIME_SCALING = False
+MAX_TRIES_FOR_TEST_TIME_SCALING = 2 # Think Twice: Enhancing LLM Reasoning by Scaling Multi-round Test-time Thinking https://arxiv.org/pdf/2503.19855
 DEFAULT_PERPLEXITY_MODEL = "sonar" # https://docs.perplexity.ai/guides/pricing
 PERPLEXITY_MODELS_WITH_SEARCH_CONTENT_SIZE = {"sonar-reasoning-pro", "sonar-reasoning", "sonar-pro", "sonar"}
 PERPLEXITY_MODELS_WITH_REASSONING_TOKENS = {"sonar-reasoning-pro", "sonar-reasoning"}
@@ -1087,6 +1089,8 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
     messages.append({"role": 'user', 'content': get_current_datetime() + '\n' + prompt})
 
     llm_call_count_to_increase_score = 0
+    # https://arxiv.org/pdf/2503.19855
+    counter_for_multi_round_test_time_scaling = 0
 
     # Main ReAct loop
     for _ in range(100):
@@ -1155,6 +1159,33 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
         # If no tool calls, check finish_reason
         if finish_reason == "stop":
 
+            if USE_MULTI_ROUND_TEST_TIME_SCALING:
+                #####################
+                # Think Twice: Enhancing LLM Reasoning 
+                # by Scaling Multi-round Test-time Thinking
+                # https://arxiv.org/pdf/2503.19855
+                #####################
+                if counter_for_multi_round_test_time_scaling == 0:
+                    counter_for_multi_round_test_time_scaling += 1
+                    messages.pop() # remove last message
+                    revise_prompt = f"The assistant’s previous answer is: <answer>{assistant_content}</answer>, and please re-answer."
+                    messages.append({'role': 'user', 'content': revise_prompt})
+                    continue
+                elif counter_for_multi_round_test_time_scaling <= MAX_TRIES_FOR_TEST_TIME_SCALING:
+                    counter_for_multi_round_test_time_scaling += 1
+                    messages.pop(); messages.pop() # remove last 2 messages
+                    revise_prompt = f"The assistant’s previous answer is: <answer>{assistant_content}</answer>, and please re-answer."
+                    messages.append({'role': 'user', 'content': revise_prompt})
+                    continue
+                else:
+                    # we have our answer, move on to scoring
+                    second_to_last = messages.pop(-2) # remove second to last
+                    #last = messages.pop(); messages.append(last)
+                    counter_for_multi_round_test_time_scaling = 0
+
+            #####################
+            # SCORING
+            #####################
             is_pass_threshold, scoring_pros_cons = score_answer(question, messages)
             is_score_worse, streak_count = analyze_scores(scores)
 
@@ -1177,10 +1208,16 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
                 is_pass_threshold = True
 
             if is_pass_threshold:
+                #####################
+                # FINAL ANSWER
+                #####################
                 prompt = f"I conduct thorough research to create detailed and balanced investigative reports. I explore every avenue to produce comprehensive narratives, considering that the user might not be an expert in the domain, class, or task. I explain concepts clearly and informatively, being sensitive to the user's perspective without highlighting any lack of expertise. I carefully analyze the entire conversation, ensuring no detail is overlooked. With this in mind, I will write a comprehensive narrative report that addresses the Who, What, When, Where, How, and Why, without using these as section titles, as a text response.\n\nUser\'s Question\n\n{question}"
                 final_answer = call_openai(prompt, OPENAI_USE_MODEL_SUMMARY, messages)
                 return final_answer
             else:
+                #####################
+                # MANAGER FEEDBACK
+                #####################
                 manager_feedback = get_manager_feedback(question, assistant_content)
                 if is_score_worse: # get rid of the last attempt and try again, we only want winners
                     #scores.pop()
