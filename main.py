@@ -1,16 +1,19 @@
 import os
 import json
-from openai import OpenAI
 import requests
 import re
+import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, cast
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from firecrawl import FirecrawlApp
 from enum import Enum, auto
+from openai import OpenAI
 from groq import Groq
+from together import Together
+from firecrawl import FirecrawlApp
+from openai.types.chat.chat_completion import ChatCompletion
 
 lock = threading.Lock()
 
@@ -19,51 +22,68 @@ class Service(Enum):
     DEEPSEEK = auto()
     OPENAI = auto()
     GROQ = auto()
+    TOGETHER = auto()
+    PERPLEXITY = auto()
 
 # SET THIS STUFF FOR YOUR USE CASE
 #####################################################
-USE_SERVICE = Service.GROQ  # Change to Service.DEEPSEEK or Service.GROQ or SERVICE.OPENAI
-ANSWER_QUALITY_THRESHOLD = 0.99 # 0.00 - 1.00
-LLM_RETRY_WAIT_TIME = 20 # in seconds
-LLM_RETRY_COUNT = 5 # in seconds
+#*** GENERAL SETTINGS ***
+# Change to Service.TOGETHER or Service.DEEPSEEK or Service.GROQ or SERVICE.OPENAI
+USE_SERVICE_REASONING = Service.GROQ
+#####################################################
 DEEPSEEK_USE_MODEL = "deepseek-reasoner"
-GROQ_USE_MODEL = "qwen-qwq-32b"
+GROQ_USE_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"#"qwen-qwq-32b"
 OPENAI_USE_MODEL = "o3-mini" # Change to "o1" or "o1-mini" if desired
-OPENAI_USE_MODEL_FEEDBACK = "gpt-4o"
-OPENAI_USE_MODEL_EXPANDED_REASONING = "gpt-4o"
-OPENAI_USE_MODEL_SCORING = "gpt-4o"
-OPENAI_USE_MODEL_SUMMARY = "o1-mini"
+TOGETHER_USE_MODEL = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"#"deepseek-ai/DeepSeek-V3"
+#####################################################
+ANSWER_QUALITY_THRESHOLD = 1.0 # 0.00 - 1.00
+MODELS_WITHOUT_TOOL_USAGE = {"o1-mini", "deepseek-reasoner", "qwen-qwq-32b", "meta-llama/llama-4-scout-17b-16e-instruct", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "deepseek-ai/DeepSeek-V3"}
+REWRITE_THE_USER_QUERY = False # Uses LLM to rewrite query
+EXPAND_PERSONA_FOR_QUESTION = True # Uses LLM to add expert persona to prompt
 MAX_TOOL_PARALLEL_THREADS = 20
-SCORING_USE_OPENAI = True
 MAX_TRIES_TO_INCREASE_SCORE = 3 # number of times with same score
-USE_MULTI_ROUND_TEST_TIME_SCALING = False
-MAX_TRIES_FOR_TEST_TIME_SCALING = 2 # Think Twice: Enhancing LLM Reasoning by Scaling Multi-round Test-time Thinking https://arxiv.org/pdf/2503.19855
+#*** PERPLEXITY SETTINGS ***
 DEFAULT_PERPLEXITY_MODEL = "sonar" # https://docs.perplexity.ai/guides/pricing
 PERPLEXITY_MODELS_WITH_SEARCH_CONTENT_SIZE = {"sonar-reasoning-pro", "sonar-reasoning", "sonar-pro", "sonar"}
-PERPLEXITY_MODELS_WITH_REASSONING_TOKENS = {"sonar-reasoning-pro", "sonar-reasoning"}
+PERPLEXITY_MODELS_WITH_REASONING_TOKENS = {"sonar-reasoning-pro", "sonar-reasoning"}
 PERPLEXITY_SEARCH_CONTENT_SIZE = "medium" # high, medium, low check out https://docs.perplexity.ai/guides/pricing
-MODELS_WITHOUT_TOOL_USAGE = {"o1-mini", "deepseek-reasoner", "qwen-qwq-32b"}
-REWRITE_THE_USER_QUERY = True
-EXPAND_PERSONA_FOR_QUESTION = True
-USE_REASONING_EXPANSION = False # Finds discounted questions in reasoning and answers them
-MAX_QUESTIONS_FOR_REASONING_EXPANSION = 3 # questions to identify from reasoning text
+#*** RETRY SETTINGS ***
+LLM_RETRY_WAIT_TIME = 20 # in seconds
+LLM_RETRY_COUNT = 5 # in seconds
+#*** SCORING ***
+USE_SERVICE_SCORING = Service.GROQ
+OPENAI_USE_MODEL_SCORING = "gpt-4o"
+LLM_USE_MODEL_SCORING = "meta-llama/llama-4-scout-17b-16e-instruct"
+#*** MANAGER FEEDBACK ***
+USE_SERVICE_FEEDBACK = Service.GROQ
+OPENAI_USE_MODEL_FEEDBACK = "gpt-4o" 
+LLM_USE_MODEL_FEEDBACK = "llama-3.3-70b-versatile"
+#*** SUMMARY ***
+USE_SERVICE_SUMMARY = Service.GROQ
+OPENAI_USE_MODEL_SUMMARY = "o1-mini"
+LLM_USE_MODEL_SUMMARY = "llama-3.3-70b-versatile"
+#*** USE THINK TWICE : REQUIRES <think> IN LLM RESPONSE ***
+# Think Twice: Enhancing LLM Reasoning by Scaling Multi-round Test-time Thinking 
+# https://arxiv.org/pdf/2503.19855
+# TLDR; get's answer with reasoning tokens, 
+# strips reasoning, feeds back answer to llm for re-answer
+# search this code for USE_MULTI_ROUND_TEST_TIME_SCALING 
+# and you will see the loop explained in more detail
+USE_MULTI_ROUND_TEST_TIME_SCALING = False
+MAX_TRIES_FOR_TEST_TIME_SCALING = 2 
+#*** EXPANDED REASONING : REQUIRES <think> IN LLM RESPONSE ***
+# Finds additional questions in <think> which may have been 
+# answered without sufficient factual context
+# Requires reasoning model. Answers questions with tools
+USE_REASONING_EXPANSION = False
+MAX_QUESTIONS_FOR_REASONING_EXPANSION = 3 # identified from <think> text
+USE_SERVICE_EXPANDED_REASONING = Service.OPENAI
+OPENAI_USE_MODEL_EXPANDED_REASONING = "gpt-4o"
+LLM_USE_MODEL_EXPANDED_REASONING = TOGETHER_USE_MODEL
 #####################################################
 
-if USE_SERVICE == Service.OPENAI:
+if USE_SERVICE_REASONING == Service.OPENAI:
     USE_REASONING_EXPANSION = False # OpenAI doesn't give us reasoning tokens
-
-if USE_SERVICE == Service.DEEPSEEK:
-    #client = OpenAI(base_url="https://api.deepseek.com")
-    #client.api_key = os.getenv("DEEPSEEK_API_KEY", "...")
-    
-    client = OpenAI(base_url="http://localhost:9001")
-    client.api_key = "nothing"
-elif USE_SERVICE == Service.GROQ:
-    client = Groq()
-    client.api_key = os.getenv("GROQ_API_KEY", "...")
-elif USE_SERVICE == Service.OPENAI:
-    client = OpenAI()
-    client.api_key = os.getenv("OPENAI_API_KEY", "...")
 
 # Always user OpenAI GPT-4o for call_openai function
 openai_client = OpenAI()
@@ -74,6 +94,33 @@ FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "...")
 
 research_questions = []
 scores = []
+grand_total_cost = 0
+
+def get_client(use_service: Service) -> Any:
+    service_mapping = {
+        Service.DEEPSEEK: lambda: OpenAI(base_url="http://localhost:9001"),
+        Service.GROQ: Groq,
+        Service.OPENAI: OpenAI,
+        Service.TOGETHER: Together,
+    }
+
+    if use_service not in service_mapping:
+        raise ValueError(f"Unsupported service: {use_service}")
+
+    client_class_or_factory = service_mapping[use_service]
+    client = client_class_or_factory() if callable(client_class_or_factory) else client_class_or_factory()
+
+    # Set API keys based on service
+    api_key_mapping = {
+        Service.DEEPSEEK: "nothing",
+        Service.GROQ: os.getenv("GROQ_API_KEY", "default_groq_api_key"),
+        Service.OPENAI: os.getenv("OPENAI_API_KEY", "default_openai_api_key"),
+        Service.TOGETHER: os.getenv("TOGETHER_API_KEY", "default_together_api_key"),
+    }
+
+    client.api_key = api_key_mapping[use_service]
+
+    return client
 
 def parse_reasoning_from_text(input_string):
     result = []
@@ -101,27 +148,31 @@ def parse_reasoning_from_text(input_string):
     return cleaned_output
 
 def remove_think_text(input_string):
-    result = []
-    skip = False
-    i = 0
-    
-    while i < len(input_string):
-        if input_string[i:i+7] == '<think>':
-            skip = True
-            i += 7
-        elif input_string[i:i+8] == '</think>':
-            skip = False
-            i += 8
-        elif not skip:
-            result.append(input_string[i])
-            i += 1
-        else:
-            i += 1
 
-    # Join the result and strip all leading whitespace
-    cleaned_output = ''.join(result).lstrip()
+    retval = input_string
+
+    if "<think>" in input_string:
+        result = []
+        skip = False
+        i = 0
+        
+        while i < len(input_string):
+            if input_string[i:i+7] == '<think>':
+                skip = True
+                i += 7
+            elif input_string[i:i+8] == '</think>':
+                skip = False
+                i += 8
+            elif not skip:
+                result.append(input_string[i])
+                i += 1
+            else:
+                i += 1
+
+        # Join the result and strip all leading whitespace
+        retval = ''.join(result).lstrip()
     
-    return cleaned_output
+    return retval
 
 def add_score(score):
     # Append the new score to the global list
@@ -235,8 +286,7 @@ def analyze_scores(scores: List[float]) -> Tuple[bool, int]:
 
 def parse_rating_response(response_data, threshold: float):
 
-    if USE_SERVICE == Service.GROQ:
-        response_data = remove_think_text(response_data)
+    response_data = remove_think_text(response_data)
 
     try:
         json_data = ""
@@ -246,7 +296,7 @@ def parse_rating_response(response_data, threshold: float):
             lines = response_data.splitlines()
             json_data = "\n".join(line for line in lines if not line.strip().startswith('```'))
 
-        print(f"Loading this json data\n\n{json_data}\n\n")
+        #print(f"Loading this json data\n\n{json_data}\n\n")
 
         data = json.loads(json_data)
         if 'Critical_Evaluation' in data:
@@ -301,10 +351,12 @@ def call_web_search_assistant(query: str, recency: str = "month") -> str:
 
         response.raise_for_status()
         data = response.json()
+        chat_response = ChatCompletion.parse_obj(data)
+
+        print_token_usage_details(chat_response, Service.PERPLEXITY, DEFAULT_PERPLEXITY_MODEL, PERPLEXITY_SEARCH_CONTENT_SIZE)
         retval = data["choices"][0]["message"]["content"]
 
-        if DEFAULT_PERPLEXITY_MODEL in PERPLEXITY_MODELS_WITH_REASSONING_TOKENS:
-            retval = remove_think_text(retval)
+        retval = remove_think_text(retval)
         
         joined_citations = "\n".join([f"[{i+1}] {cite}" for i, cite in enumerate(data["citations"])])
         citations = f"\n\nCitations:\n{joined_citations}"
@@ -327,41 +379,25 @@ def call_web_content_retriever(url: str) -> str:
         retval = f"Error returning markdown data from {url}: {str(e)}"
     return retval
 
-def call_llm(prompt: str, model: str = OPENAI_USE_MODEL_SCORING, messages: Optional[List[Dict[str, str]]] = None) -> str:
-    """
-    Calls LLM for advanced reasoning or sub-queries.
-    """
-    helper_messages = []
-
-    if USE_SERVICE == Service.DEEPSEEK:
-        model = DEEPSEEK_USE_MODEL
-    if USE_SERVICE == Service.GROQ:
-        model = GROQ_USE_MODEL
-
+def call_llm(prompt: str, model: str, USE_SERVICE: Service, message_prefix:str = None, messages: Optional[List[Dict[str, str]]] = None) -> str:
+    tmp_messages = []
     if messages is None:
-        helper_messages = [
+        tmp_messages = [
             {'role': 'user', 'content': get_current_datetime() + '\n' + prompt}
         ]
     else:
-        helper_messages = messages.copy()
+        tmp_messages = messages.copy()
         # Append the user message if messages were provided
-        helper_messages.append({'role': 'user', 'content': prompt})
-    
-    try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=helper_messages
-        )
-
-        output = completion.choices[0].message.content
-
-        if USE_SERVICE == Service.GROQ or USE_SERVICE == Service.DEEPSEEK:
-            output = remove_think_text(output)
-
-        return output
-
-    except Exception as e:
-        return f"Error calling LLM model='{model}': {str(e)}"
+        tmp_messages.append({'role': 'user', 'content': prompt})
+    client = get_client(USE_SERVICE)
+    args = {
+        "model": model,
+        "messages": tmp_messages,
+    }
+    retval = call_llm_api_with_retry(client, args)
+    print(f"{message_prefix} {USE_SERVICE} {model}")
+    print_token_usage_details(retval, USE_SERVICE, model)
+    return retval
     
 def call_openai(prompt: str, model: str = "gpt-4o", messages: Optional[List[Dict[str, str]]] = None) -> str:
     """
@@ -384,11 +420,17 @@ def call_openai(prompt: str, model: str = "gpt-4o", messages: Optional[List[Dict
             messages=helper_messages
         )
 
+        print_token_usage_details(completion, Service.OPENAI, model)
+
         output = completion.choices[0].message.content
 
-        if USE_SERVICE == Service.GROQ:
-            output = remove_think_text(output)
+        output = remove_think_text(output)
 
+        print("*" * 100)
+        print(f"INPUT:\n{prompt}")
+        print("*" * 100)
+        print(f"OUTPUT:\n{output}")
+        print("*" * 100)
         return output
 
     except Exception as e:
@@ -506,7 +548,7 @@ def parse_tool_calls_from_text(assistant_content: str) -> List[Dict[str, Any]]:
     If none found, returns an empty list.
     """
     # Find all JSON blocks demarcated by triple backticks (```json ... ```).
-    pattern = r'```json\s*(.*?)\s*```'
+    pattern = r'```(?:json)?\s*(.*?)\s*```'#pattern = r'```json\s*(.*?)\s*```'
     blocks = re.findall(pattern, assistant_content, flags=re.DOTALL)
     tool_calls = []
     for block in blocks:
@@ -535,66 +577,124 @@ def compress_messages_to_single_user_message(messages) -> Dict[str,str]:
         formatted_output += f"\n=====\n[{role.upper()}]:\n=====\n{content}\n\n"
     return [{"role":"user", "content":formatted_output}]
 
-def get_model_args(model_version, tools=None):
-    if model_version == "o1":
-        MAX_PROMPT_TOKENS = 60000
-        model_args = {
-            "model": model_version,
-            "tools": tools,
-            "reasoning_effort": "high",
-            "max_completion_tokens": 100000,
-            "response_format": {"type": "text"},
+def get_model_pricing(service: Service, model_id: str, perplexity_content_size: str = None):
+
+    perplexity_content_pricing = {
+        "sonar": { "low": 5, "medium": 8, "high": 12 },
+        "sonar-pro": { "low": 6, "medium": 10, "high": 14 },
+    }
+    # Nested dictionary containing pricing information for each service and its models
+    models_pricing = {
+        Service.PERPLEXITY: {
+            "sonar": {"input_price": 1.0, "output_price": 1.0},
+            "sonar-pro": {"input_price": 3.0, "output_price": 15.0},
+        },
+        Service.GROQ: {
+            "meta-llama/llama-4-scout-17b-16e-instruct": {"input_price": 0.11, "output_price": 0.34},
+            "meta-llama/llama-4-maverick-17b-128e-instruct": {"input_price": 0.50, "output_price": 0.77},
+            "deepseek-r1-distill-llama-70b": {"input_price": 0.75, "output_price": 0.99},
+            "deepseek-r1-distill-qwen-32b": {"input_price": 0.69, "output_price": 0.69},
+            "qwen-2.5-32b": {"input_price": 0.79, "output_price": 0.79},
+            "qwen-2.5-coder-32b": {"input_price": 0.79, "output_price": 0.79},
+            "qwen-qwq-32b": {"input_price": 0.29, "output_price": 0.39},
+            "mistral-saba-24b": {"input_price": 0.79, "output_price": 0.79},
+            "llama3-70b-8192": {"input_price": 0.59, "output_price": 0.79},
+            "llama3-8b-8192": {"input_price": 0.05, "output_price": 0.08},
+            "llama-3.3-70b-versatile": {"input_price": 0.59, "output_price": 0.79},
+            "llama-3.1-8b-instant": {"input_price": 0.05, "output_price": 0.08},
+            "llama-guard-3-8b": {"input_price": 0.20, "output_price": 0.20},
+            "llama-3.3-70b-specdec": {"input_price": 0.59, "output_price": 0.99},
+            "llama-3.2-1b-preview": {"input_price": 0.04, "output_price": 0.04},
+            "llama-3.2-3b-preview": {"input_price": 0.06, "output_price": 0.06},
+            "gemma2-9b-it": {"input_price": 0.20, "output_price": 0.20},
+        },
+        Service.OPENAI: {
+            "o1-mini": {"input_price": 1.10, "output_price": 4.40},
+            "o3-mini": {"input_price": 1.10, "output_price": 4.40},
+            "gpt-4o": {"input_price": 2.50, "output_price": 10.00},
+        },
+        Service.DEEPSEEK: {
+            # Add DeepSeek-specific models and their pricing here if different from GROQ
+        },
+        Service.TOGETHER: {
+            "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {"input_price": 0.27, "output_price": 0.85},
+            "meta-llama/Llama-4-Scout-17B-16E-Instruct": {"input_price": 0.18, "output_price": 0.59},
+            "deepseek-ai/DeepSeek-V3": {"input_price": 1.25, "output_price": 1.25},
         }
-    elif model_version == "o3-mini":
-        MAX_PROMPT_TOKENS = 60000
-        model_args = {
-            "model": model_version,
-            "tools": tools,
-            "reasoning_effort": "high",
-            "max_completion_tokens": 100000,
-            "response_format": {"type": "text"},
-        }
-    elif model_version == "o1-mini":
-        MAX_PROMPT_TOKENS = 60000
-        model_args = {
-            "model": model_version,
-            "max_completion_tokens": 65536,
-            "response_format": {"type": "text"},
-        }
-    elif model_version == "deepseek-reasoner":
-        MAX_PROMPT_TOKENS = 64000
-        model_args = {
-            "model": model_version,
-            "max_tokens": 8192,
-            "temperature": 1.5,
-            "stream": False,
-        }
-    elif model_version == "qwen-qwq-32b":
-        MAX_PROMPT_TOKENS = 64000
-        model_args = {
-            "model": model_version,
-            "max_tokens": 32768,
-            "temperature": 0.6,
-        }
+    }
+
+    perplexity_additional_per_request = 0
+    if service == Service.PERPLEXITY:
+        # Per 1,000 requests
+        perplexity_content_size_pricing = perplexity_content_pricing.get(model_id) 
+        perplexity_additional = perplexity_content_size_pricing.get(perplexity_content_size)
+        perplexity_additional_per_request = perplexity_additional / 1000
+        print(f"Perplexity: {perplexity_content_size_pricing} {perplexity_additional} {perplexity_additional_per_request}")
+
+    # Retrieve the pricing dictionary for the specified service
+    service_pricing = models_pricing.get(service)
+
+    if not service_pricing:
+        return 0, 0, 0 # return zero pricing
+
+    # Retrieve the pricing for the specified model
+    model_pricing = service_pricing.get(model_id)
+
+    if model_pricing:
+        input_price = model_pricing.get("input_price")
+        output_price = model_pricing.get("output_price")
+
+        if input_price != "Not Available" and output_price != "Not Available":
+            return input_price, output_price, perplexity_additional_per_request
+        else:
+            return 0, 0, 0 # return zero pricing
     else:
-        raise ValueError(f"Unsupported model version: {model_version}")
+        return 0, 0, 0 # return zero pricing
+    
+def get_model_args(model_version, USE_SERVICE: Service, tools=None):
+    MAX_PROMPT_TOKENS = 60000
+    model_args = {"model": model_version}
+    if model_version == "llama-3.3-70b-versatile":
+        if USE_SERVICE != Service.GROQ:
+            raise ValueError(f"Unsupported service: {USE_SERVICE} model: {model_version}")
+        model_args.update({"max_completion_tokens": 32768})
+    elif model_version == "deepseek-ai/DeepSeek-V3":
+        if USE_SERVICE != Service.TOGETHER:
+            raise ValueError(f"Unsupported service: {USE_SERVICE} model: {model_version}")
+        model_args.update({"max_completion_tokens": 12288})
+    elif model_version == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8":
+        if USE_SERVICE != Service.TOGETHER:
+            raise ValueError(f"Unsupported service: {USE_SERVICE} model: {model_version}")
+        model_args.update({"max_completion_tokens": 524000 - MAX_PROMPT_TOKENS})
+    elif model_version == "meta-llama/llama-4-scout-17b-16e-instruct":
+        if USE_SERVICE == Service.TOGETHER:
+            model_args.update({"max_completion_tokens": 327680 - MAX_PROMPT_TOKENS})
+        elif USE_SERVICE == Service.GROQ:
+            model_args.update({"max_completion_tokens": 8192})
+        else:
+            raise ValueError(f"Unsupported service: {USE_SERVICE} model: {model_version}")
+    elif model_version in ("o1", "o3-mini"):
+        model_args.update({"tools": tools, "reasoning_effort": "high", "max_completion_tokens": 100000, "response_format": {"type": "text"}})
+    elif model_version == "o1-mini":
+        model_args.update({"max_completion_tokens": 65536, "response_format": {"type": "text"}})
+    elif model_version == "deepseek-reasoner":
+        model_args.update({"max_tokens": 8192, "temperature": 1.5, "stream": False})
+    elif model_version == "qwen-qwq-32b":
+        model_args.update({"max_tokens": 32768, "temperature": 0.6})
+    else:
+        raise ValueError(f"Unsupported service: {USE_SERVICE} model: {model_version}")
 
     return MAX_PROMPT_TOKENS, model_args
 
 def call_llm_api_with_retry(client, args, retry_count=LLM_RETRY_COUNT, retry_wait_time=LLM_RETRY_WAIT_TIME):
     llm_call_count = 0
-    
     while llm_call_count < retry_count:
         try:
             llm_call_count += 1
-            if llm_call_count == 1:
-                print("LLM CALL")
-            else:
+            if llm_call_count > 1:
                 print(f"LLM CALL TRY {llm_call_count} of {retry_count}")
-
             response = client.chat.completions.create(**args)
             return response  # Return the response on success
-
         except Exception as e:
             print(f"Error calling LLM, waiting {retry_wait_time} seconds: {e}")
             if llm_call_count < retry_count:
@@ -648,6 +748,7 @@ def get_reasoning_tools_and_messages(model_version, messages, msg, assistant_con
         reasoning_content = parse_reasoning_from_text(assistant_content)
         assistant_content = remove_think_text(assistant_content)
         tool_calls = parse_tool_calls_from_text(assistant_content)
+        append_message(reasoning_content)
         append_message(assistant_content)
     else:
         tool_calls = parse_tool_calls_from_text(assistant_content)
@@ -668,7 +769,12 @@ def expand_reasoning(reasoning_content, tool_calls, messages):
             {reasoning_content}
             ```
             """
-            llm_question_response = call_openai(prompt, OPENAI_USE_MODEL_EXPANDED_REASONING)
+
+            if USE_SERVICE_EXPANDED_REASONING == Service.OPENAI:
+                llm_question_response = call_openai(prompt, OPENAI_USE_MODEL_EXPANDED_REASONING)
+            else:
+                retval = call_llm(prompt, LLM_USE_MODEL_EXPANDED_REASONING, USE_SERVICE_EXPANDED_REASONING, "***** EXPANDED REASONING *****")
+                llm_question_response = retval.choices[0].message.content
 
             prompt = f"""
             In a moment but not now, pre-read the proposed_questions, tool_calls, and prior_questions below, then consolidate the questions which are similar in proposed_questions. Eliminate any question from proposed_questions which is similar to a question in tool_calls or prior_questions. For each question identified, respond on a single line with the question and it's context identified with Context:. Response must not include additional formatting, numbering, bullets, introduction, commentary, or conclusion. All I need is a list of questions, one per line, with the associated context on the same line.
@@ -720,17 +826,29 @@ def expand_reasoning(reasoning_content, tool_calls, messages):
     
     return messages
 
-def print_token_usage_details(response):
+def print_token_usage_details(response, service: Service, model:str, perplexity_content_size:str = None):
+
     usage = getattr(response, 'usage', None)
+
+    input, output, additional = get_model_pricing(service, model, perplexity_content_size)
+
+    print(f"PRICING service: {service} model: {model} input: {input:.6f} output: {output:.6f} tool:{additional:.6f}")
 
     if usage:
         prompt_tokens = getattr(usage, 'prompt_tokens', 'N/A')
         completion_tokens = getattr(usage, 'completion_tokens', 'N/A')
         total_tokens = getattr(usage, 'total_tokens', 'N/A')
 
-        print(f"USAGE... Prompt {prompt_tokens} "
-              f"Completion {completion_tokens} "
-              f"Total {total_tokens}")
+        input_price = (prompt_tokens/1000000) * input
+        output_price = (completion_tokens/1000000) * output
+
+        global grand_total_cost
+        grand_total_cost = grand_total_cost + input_price + output_price + additional
+
+        print(f"USAGE... Prompt {prompt_tokens} -> ${input_price:.6f} "
+              f"Completion {completion_tokens} -> ${output_price:.6f} "
+              f"Tools -> ${additional:.6f} "
+              f"Grand_Total ${grand_total_cost:.6f}")
 
         details = getattr(usage, 'completion_tokens_details', None)
 
@@ -764,7 +882,7 @@ def process_single_tool_call(tc, model_version):
     func_name = tc["function"]["name"] if isinstance(tc, dict) else tc.function.name
     arguments_json = tc["function"]["arguments"] if isinstance(tc, dict) else tc.function.arguments
 
-    print(f"Tool name: {func_name}\nArguments: {arguments_json}\n")
+    print(f"***** TOOL CALL ***** Tool name: {func_name} Arguments: {arguments_json}")
 
     # Attempt to parse arguments JSON
     try:
@@ -1018,7 +1136,7 @@ Respond only in JSON following the example template below.
 def get_prompt_manager_feedback(question, scores_text, assistant_content) -> str:
     return f"""
     You are a highly successful people manager with all company resources at your disposal. Your employee is performing the following task and has received the following scores and feedback. Response must include your best concise motivational speech to the employee to substantially increase their score on the task. If their work scored the same as last time you must be stern on requiring improvement. If their work has scored worst than last time, you really need to be direct and finite on the need for improvement. Provide incentives for good performance and discourage poor performance through constructive feedback or consequences. 
-    Respond as if you are talking to them directly without mentioning their name.
+    Respond in first person as if you are talking to them directly without mentioning their name.
 
     ``` task
     {question}
@@ -1037,20 +1155,26 @@ def score_answer(question, messages):
 
     is_pass_threshold = False
 
-    if SCORING_USE_OPENAI:
+    if USE_SERVICE_SCORING == Service.OPENAI:
         scoring_pros_cons = call_openai(get_prompt_llm_as_a_judge(question), model=OPENAI_USE_MODEL_SCORING, messages=messages)
     else:
-        scoring_pros_cons = call_llm(get_prompt_llm_as_a_judge(question), model=OPENAI_USE_MODEL_SCORING, messages=messages)
+        retval = call_llm(get_prompt_llm_as_a_judge(question), LLM_USE_MODEL_SCORING, USE_SERVICE_SCORING, "***** SCORING *****", messages)
+        scoring_pros_cons = retval.choices[0].message.content
 
+    #print(f"Scoring Response:\n{scoring_pros_cons}\n")
     is_pass_threshold = parse_rating_response(scoring_pros_cons, ANSWER_QUALITY_THRESHOLD)
-    print(f"DID THE ANSWER PASS ANSWER_QUALITY_THRESHOLD = {ANSWER_QUALITY_THRESHOLD} {is_pass_threshold}\n\n\n")
+    print(f"DID THE ANSWER PASS ANSWER_QUALITY_THRESHOLD = {ANSWER_QUALITY_THRESHOLD} {is_pass_threshold}")
 
     return is_pass_threshold, scoring_pros_cons
 
 def get_manager_feedback(question, assistant_content):
     scores_text = "Scores:" + ", ".join(map(str, scores))
     manager_feedback_prompt = get_prompt_manager_feedback(question, scores_text, assistant_content)
-    manager_feedback = call_openai(manager_feedback_prompt, OPENAI_USE_MODEL_FEEDBACK)
+    if USE_SERVICE_FEEDBACK == Service.OPENAI:
+        manager_feedback = call_openai(manager_feedback_prompt, OPENAI_USE_MODEL_FEEDBACK)
+    else:
+        retval = call_llm(manager_feedback_prompt, LLM_USE_MODEL_FEEDBACK, USE_SERVICE_FEEDBACK, "***** MANAGER FEEDBACK *****")
+        manager_feedback = retval.choices[0].message.content
     return manager_feedback
 
 def call_research_professional(question: str, prompt: str, model_version: str = OPENAI_USE_MODEL) -> str:
@@ -1058,10 +1182,12 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
     Calls reasoning LLM 
     """
 
-    if USE_SERVICE == Service.DEEPSEEK:
+    if USE_SERVICE_REASONING == Service.DEEPSEEK:
         model_version = DEEPSEEK_USE_MODEL
-    if USE_SERVICE == Service.GROQ:
+    if USE_SERVICE_REASONING == Service.GROQ:
         model_version = GROQ_USE_MODEL
+    if USE_SERVICE_REASONING == Service.TOGETHER:
+        model_version = TOGETHER_USE_MODEL
 
     is_final_answer = False
     
@@ -1073,7 +1199,7 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
             "executions using JSON in your responses, and I'll run them and return the results in user messages. "
             "You are able to call tools just by telling me you want to run a tool by responding with JSON as described below. "
             "You are a helpful AI that can use the following tools by producing JSON in your message. "
-            "To call multiple tools, output multiple JSON blocks (in triple backticks, with a line ```json) in a single response."
+            "To call multiple tools (max 5), output multiple JSON blocks (in triple backticks, with a line ```json) in a single response."
             "When you want to call a tool, output EXACTLY a JSON block (in triple backticks, with a line ```json) "
             "of the form:\n\n"
             "{\n"
@@ -1100,7 +1226,7 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
         # for DeepSeek they don't support multiple messages
         # need to create a big string with user/assistant messages
         # and set as single user message
-        if USE_SERVICE == Service.DEEPSEEK: 
+        if USE_SERVICE_REASONING == Service.DEEPSEEK: 
             base_args = {
                 "messages": compress_messages_to_single_user_message(messages),
             }
@@ -1109,11 +1235,14 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
                 "messages": messages,
             }
 
-        MAX_PROMPT_TOKENS, model_args = get_model_args(model_version, tools)
+        client = get_client(USE_SERVICE_REASONING)
+
+        MAX_PROMPT_TOKENS, model_args = get_model_args(model_version, USE_SERVICE_REASONING, tools)
 
         # Merge common and model-specific settings
         args = {**base_args, **model_args}
 
+        print(f"***** REASONING LOOP ***** {USE_SERVICE_REASONING} {model_version}")
         response = call_llm_api_with_retry(client, args)
 
         #debug_json(response, "Message Received")
@@ -1135,7 +1264,7 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
 
         #debug_json(messages,"Message Stack After:")
 
-        print_token_usage_details(response)
+        print_token_usage_details(response, USE_SERVICE_REASONING, model_version)
 
         # Log to a file
         try:
@@ -1167,20 +1296,26 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
                 #####################
                 if counter_for_multi_round_test_time_scaling == 0:
                     counter_for_multi_round_test_time_scaling += 1
-                    messages.pop() # remove last message
+                    # remove llm response with <think> and answer
+                    messages.pop()
+                    # replace it with just the answer
                     revise_prompt = f"The assistant’s previous answer is: <answer>{assistant_content}</answer>, and please re-answer."
                     messages.append({'role': 'user', 'content': revise_prompt})
                     continue
                 elif counter_for_multi_round_test_time_scaling <= MAX_TRIES_FOR_TEST_TIME_SCALING:
                     counter_for_multi_round_test_time_scaling += 1
-                    messages.pop(); messages.pop() # remove last 2 messages
+                    # remove re-answer msg from prior step
+                    messages.pop(); 
+                    # remove llm response with <think> and answer
+                    messages.pop() 
+                    # replace it with re-anwer msg
                     revise_prompt = f"The assistant’s previous answer is: <answer>{assistant_content}</answer>, and please re-answer."
                     messages.append({'role': 'user', 'content': revise_prompt})
                     continue
                 else:
                     # we have our answer, move on to scoring
-                    second_to_last = messages.pop(-2) # remove second to last
-                    #last = messages.pop(); messages.append(last)
+                    # remove re-answer msg, but keep llm response with <think> and answer
+                    second_to_last = messages.pop(-2) # remove second to last msg
                     counter_for_multi_round_test_time_scaling = 0
 
             #####################
@@ -1211,8 +1346,50 @@ def call_research_professional(question: str, prompt: str, model_version: str = 
                 #####################
                 # FINAL ANSWER
                 #####################
-                prompt = f"I conduct thorough research to create detailed and balanced investigative reports. I explore every avenue to produce comprehensive narratives, considering that the user might not be an expert in the domain, class, or task. I explain concepts clearly and informatively, being sensitive to the user's perspective without highlighting any lack of expertise. I carefully analyze the entire conversation, ensuring no detail is overlooked. With this in mind, I will write a comprehensive narrative report that addresses the Who, What, When, Where, How, and Why, without using these as section titles, as a text response.\n\nUser\'s Question\n\n{question}"
-                final_answer = call_openai(prompt, OPENAI_USE_MODEL_SUMMARY, messages)
+                prompt = f"I conduct thorough research to create detailed and balanced investigative reports. I explore every avenue to produce comprehensive narratives, considering that the user might not be an expert in the domain, class, or task. I explain concepts clearly and informatively, being sensitive to the user's perspective without highlighting any lack of expertise. I carefully analyze the entire conversation, ensuring no detail is overlooked. With this in mind, I will write a comprehensive narrative report that addresses the Who, What, When, Where, How, and Why, without using these as section titles, as a text response. IMPORTANT: cite all sources inline as part of narrative text with url in parenthesis. \n\nUser\'s Question\n\n{question}"
+
+                prompt = f"""
+**Instruction for Generating a Comprehensive Investigative Report**
+
+You are tasked with creating an extensive and detailed investigative report based on the provided user question and our entire conversation. Your report should be thorough, balanced, and meticulously analyze all aspects of the user's question Ensure that no detail from the context is overlooked. The report should be accessible to users who may not be experts in the relevant domain, so explain all concepts clearly and informatively without implying any lack of expertise on the user's part.
+
+**Requirements:**
+
+1. **Depth and Detail:**
+   - Explore every avenue related to the topic.
+   - Include all pertinent information from the context.
+   - Provide a nuanced and comprehensive narrative.
+
+2. **Structure and Content:**
+   - Address the following elements within the narrative: "Who," "What," "When," "Where," "How," or "Why"
+   - Do not use "Who," "What," "When," "Where," "How," or "Why" as section titles. Instead, integrate these elements seamlessly into the text.
+
+3. **Clarity and Accessibility:**
+   - Explain all relevant concepts in a clear and informative manner.
+   - Maintain sensitivity to the user's perspective, ensuring the report is understandable without assuming prior expertise.
+
+4. **Source Citation:**
+   - Use MLA citations
+   - Cite all sources inline using parenthesis.
+   - Separate works cited page at the end of document with all sources.
+
+5. **Length and Comprehensiveness:**
+   - Produce an exceptionally long and detailed report that thoroughly covers the topic.
+   - Ensure the report maintains coherence and readability despite its length.
+   
+```User's Question
+{question}
+```
+"""
+                
+                print("*" * 50)
+                print("***** PRODUCING FINAL ANSWER *****")
+                print("*" * 50)
+                if USE_SERVICE_SUMMARY == Service.OPENAI:
+                    final_answer = call_openai(prompt, OPENAI_USE_MODEL_SUMMARY, messages)
+                else:
+                    retval = call_llm(prompt, LLM_USE_MODEL_SUMMARY, USE_SERVICE_SUMMARY, messages)
+                    final_answer = retval.choices[0].message.content
                 return final_answer
             else:
                 #####################
@@ -1305,4 +1482,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    start_ns = time.perf_counter_ns()
+    try:
+        main()
+    finally:
+        end_ns = time.perf_counter_ns()
+        elapsed_ns = end_ns - start_ns
+        elapsed_sec = elapsed_ns / 1_000_000_000  # Convert nanoseconds to seconds
+        elapsed_min = elapsed_sec / 60  # Convert seconds to minutes
+        print(
+            f"Executed in {elapsed_sec:.2f} seconds ({elapsed_min:.2f} minutes)"
+        )        
+        
+
+
+    
