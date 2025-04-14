@@ -1,0 +1,8 @@
+openai
+together
+firecrawl
+requests
+groq
+enum34
+python-dotenv
+browser-use
