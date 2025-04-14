@@ -29,22 +29,25 @@ Deep Research Assistant is an advanced Python-based research pipeline that lever
 Before running the application, set the following environment variables with your API keys:
 
 - **OPENAI_API_KEY**  
-- **GROQ_API_KEY** (if using the GROQ service)
-- **DEEPSEEK_API_KEY** (if using DEEPSEEK service)
-- **FIREWORKS_API_KEY** (if using FIREWORKS.AI service)
-- **TOGETHER_API_KEY** (if using TOGETHER.AI service)
 - **PERPLEXITY_API_KEY**  
 - **FIRECRAWL_API_KEY**
+- **GROQ_API_KEY** (if using the GROQ service for reasoning)
+- **DEEPSEEK_API_KEY** (if using DEEPSEEK service for reasoning)
+- **FIREWORKS_API_KEY** (if using FIREWORKS.AI service for reasoning)
+- **TOGETHER_API_KEY** (if using TOGETHER.AI service for reasoning)
+
 
 For example, on Linux or macOS:
 
    export OPENAI_API_KEY="your_openai_key"  
+   export PERPLEXITY_API_KEY="your_perplexity_key"  
+   export FIRECRAWL_API_KEY="your_firecrawl_key"
+
    export GROQ_API_KEY="your_groq_key"  
    export DEEPSEEK_API_KEY="your_deepseek_key"  
    export FIREWORKS_API_KEY="your_deepseek_key"  
    export TOGETHER_API_KEY="your_deepseek_key"  
-   export PERPLEXITY_API_KEY="your_perplexity_key"  
-   export FIRECRAWL_API_KEY="your_firecrawl_key"
+
 
 Alternatively, create a `.env` file and use a package like python-dotenv to load these variables.
 
